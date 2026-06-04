@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS webhook_subscriptions (
     events          TEXT[]       NOT NULL DEFAULT ARRAY['INSERT', 'UPDATE', 'DELETE'],
     secret          VARCHAR(255) NOT NULL,
     active          BOOLEAN      DEFAULT true,
-    created_at      TIMESTAMP    DEFAULT NOW()
+    created_at      TIMESTAMP    DEFAULT NOW(),
     CONSTRAINT unique_webhook UNIQUE (url, table_name)
 );
 
