@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS products (
     stock INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT NOW()
 );
+SELECT pg_create_logical_replication_slot('cdc_pipeline_slot', 'wal2json')
+WHERE NOT EXISTS (
+  SELECT 1 FROM pg_replication_slots WHERE slot_name = 'cdc_pipeline_slot'
+);
 
 -- Insert some seed data
 INSERT INTO users (name, email) VALUES
