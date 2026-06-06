@@ -2,14 +2,16 @@ import { Router } from 'express'
 import { query } from '../../db/postgres.js'
 import logger from '../../utils/logger.js'
 
-
-import { eventRouter } from '../../index.js' 
+// Notice: No import from index.js here!
 
 const router = Router()
 
 router.post('/', async (req, res, next) => {
   try {
     const { from, table } = req.body
+    
+    // Grab the router that we injected into the Express app
+    const eventRouter = req.app.get('eventRouter')
 
     if (!from) {
       return res.status(400).json({ error: '"from" timestamp is required' })
@@ -21,7 +23,8 @@ router.post('/', async (req, res, next) => {
       table: table || 'all',
     })
 
-    runBackgroundReplay(from, table).catch(err => {
+    // Pass the router down to the background job
+    runBackgroundReplay(from, table, eventRouter).catch(err => {
       logger.error('Background replay job crashed', { error: err.message })
     })
 
@@ -30,7 +33,7 @@ router.post('/', async (req, res, next) => {
   }
 })
 
-async function runBackgroundReplay(fromTimestamp, targetTable) {
+async function runBackgroundReplay(fromTimestamp, targetTable, eventRouter) {
   logger.info('Starting background replay job...', { from: fromTimestamp, table: targetTable })
 
   let offset = 0
@@ -61,7 +64,6 @@ async function runBackgroundReplay(fromTimestamp, targetTable) {
       const simulatedEvent = {
         type: row.operation,
         table: row.table_name,
-        // Parse the JSONB data back into objects
         row: row.new_data ? JSON.parse(row.new_data) : null,
         old: row.old_data ? JSON.parse(row.old_data) : null,
         lsn: row.lsn,
