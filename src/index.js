@@ -4,21 +4,24 @@ import { testConnection as testPostgres } from './db/postgres.js'
 import { testConnection as testRedis } from './db/redis.js'
 import { CheckpointManager } from './checkpoint/checkpointManager.js'
 import { WalListener } from './listener/walListener.js'
+import { EventRouter } from './router/eventRouter.js'
 
 dotenv.config()
+
+let walListener;
+let checkpointManager;
+let eventRouter;
 
 const main = async () => {
   logger.info('CDC Pipeline starting...')
   logger.info('Running startup checks...')
 
-  // Check Postgres
   const pgOk = await testPostgres()
   if (!pgOk) {
     logger.error('Postgres check failed — exiting')
     process.exit(1)
   }
 
-  // Check Redis
   const redisOk = await testRedis()
   if (!redisOk) {
     logger.error('Redis check failed — exiting')
@@ -27,44 +30,75 @@ const main = async () => {
 
   logger.info('All startup checks passed')
 
-  // Load last checkpoint
-  const checkpointManager = new CheckpointManager()
+  checkpointManager = new CheckpointManager()
+  walListener = new WalListener()
+  eventRouter = new EventRouter()
+
+  await eventRouter.startAll()
+
   const lastLsn = await checkpointManager.loadLastCheckpoint()
   logger.info('Checkpoint manager ready', { resumingFrom: lastLsn })
 
-  // Start WAL listener
-  const walListener = new WalListener()
-
   walListener.on('change', async (event) => {
-    logger.info('EVENT RECEIVED', {
-      type: event.type,
-      table: event.table,
-      row: event.row,
-    })
+    try {
+      await eventRouter.route(event)
 
-    // Save checkpoint first, then acknowledge to Postgres
-    await checkpointManager.saveCheckpoint(event.lsn)
-    checkpointManager.recordEventProcessed()
-    await walListener.acknowledge(event.lsn)
+      checkpointManager.recordEventProcessed()
+
+    } catch (err) {
+   
+      logger.error('CRITICAL: Pipeline halted due to consumer failure', { 
+        error: err.message, 
+        lsn: event.lsn 
+      })
+      await gracefulShutdown()
+      process.exit(1)
+    }
   })
 
-  // Start auto checkpointing
-  checkpointManager.startAutoCheckpoint(() => walListener.getLastLsn())
+  checkpointManager.startAutoCheckpoint(() => {
+    const lsn = walListener.getLastLsn()
+    if (lsn !== '0/0') walListener.acknowledge(lsn)
+    return lsn
+  })
 
-  // Start listening
   logger.info('Starting WAL Listener...')
   await walListener.start(lastLsn)
 }
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received — shutting down gracefully')
+
+const gracefulShutdown = async () => {
+  logger.info('Initiating graceful shutdown sequence...')
+  
+  if (checkpointManager) {
+    checkpointManager.stopAutoCheckpoint()
+    // Force one final save before dying
+    const finalLsn = walListener.getLastLsn()
+    if (finalLsn !== '0/0') {
+      await checkpointManager.saveCheckpoint(finalLsn)
+      await walListener.acknowledge(finalLsn)
+    }
+  }
+
+  if (walListener) await walListener.stop()
+  if (eventRouter) await eventRouter.stopAll()
+  
+  logger.info('Shutdown complete. Goodbye!')
+}
+
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received')
+  await gracefulShutdown()
   process.exit(0)
 })
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received — shutting down gracefully')
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received (Ctrl+C)')
+  await gracefulShutdown()
   process.exit(0)
 })
 
-main()
+main().catch(err => {
+  logger.error('Fatal application crash', { error: err.message })
+  process.exit(1)
+})
